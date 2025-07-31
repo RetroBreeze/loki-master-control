@@ -87,6 +87,17 @@ fn default_sink() -> &'static str {
         .as_str()
 }
 
+fn rfkill_blocked(kind: &str) -> Option<bool> {
+    let out = Command::new("rfkill").args(&["list", kind]).output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    for line in text.lines() {
+        if let Some(rest) = line.trim().strip_prefix("Soft blocked:") {
+            return Some(rest.trim() == "yes");
+        }
+    }
+    None
+}
+
 fn build_ui(app: &Application) {
     // Main window setup
     let window = ApplicationWindow::builder()
@@ -132,11 +143,53 @@ fn build_ui(app: &Application) {
     // Row 1: Connectivity buttons centered
     let row1 = gtk::Box::new(Orientation::Horizontal, 8);
     row1.set_halign(Align::Center);
-    for label in ["Wi-Fi", "Bluetooth", "Airplane"] {
-        let btn = gtk::Button::with_label(label);
-        btn.add_css_class("circular");
-        row1.append(&btn);
+
+    // Wi-Fi toggle
+    let wifi_btn = gtk::ToggleButton::with_label("Wi-Fi");
+    wifi_btn.add_css_class("circular");
+    if let Some(blocked) = rfkill_blocked("wifi") {
+        wifi_btn.set_active(blocked);
     }
+    {
+        wifi_btn.connect_toggled(|_| {
+            if let Err(e) = Command::new("rfkill").args(&["toggle", "wifi"]).spawn() {
+                eprintln!("Failed to toggle Wi-Fi: {}", e);
+            }
+        });
+    }
+    row1.append(&wifi_btn);
+
+    // Bluetooth toggle
+    let bt_btn = gtk::ToggleButton::with_label("Bluetooth");
+    bt_btn.add_css_class("circular");
+    if let Some(blocked) = rfkill_blocked("bluetooth") {
+        bt_btn.set_active(blocked);
+    }
+    {
+        bt_btn.connect_toggled(|_| {
+            if let Err(e) = Command::new("rfkill").args(&["toggle", "bluetooth"]).spawn() {
+                eprintln!("Failed to toggle Bluetooth: {}", e);
+            }
+        });
+    }
+    row1.append(&bt_btn);
+
+    // Airplane mode toggle
+    let airplane_btn = gtk::ToggleButton::with_label("Airplane");
+    airplane_btn.add_css_class("circular");
+    if rfkill_blocked("wifi") == Some(true) && rfkill_blocked("bluetooth") == Some(true) {
+        airplane_btn.set_active(true);
+    }
+    {
+        airplane_btn.connect_toggled(|btn| {
+            let args = if btn.is_active() { vec!["block", "all"] } else { vec!["unblock", "all"] };
+            if let Err(e) = Command::new("rfkill").args(&args).spawn() {
+                eprintln!("Failed to toggle airplane mode: {}", e);
+            }
+        });
+    }
+    row1.append(&airplane_btn);
+
     vbox.append(&row1);
 
     // Row 2: Brightness slider + label
