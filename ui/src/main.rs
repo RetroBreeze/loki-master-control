@@ -101,6 +101,14 @@ fn rfkill_blocked(kind: &str) -> Option<bool> {
 }
 
 fn is_wayland() -> bool {
+    if let Some(display) = gdk::Display::default() {
+        if display.is_wayland() {
+            return true;
+        }
+        if display.is_x11() {
+            return false;
+        }
+    }
     match env::var("XDG_SESSION_TYPE") {
         Ok(v) if v.eq_ignore_ascii_case("wayland") => true,
         _ => env::var("WAYLAND_DISPLAY").is_ok(),
@@ -126,6 +134,10 @@ fn aspect_ratio(mode: &str) -> Option<String> {
 
 fn query_resolutions_x11() -> Option<(Vec<String>, usize)> {
     let out = Command::new("xrandr").output().ok()?;
+    if !out.status.success() {
+        eprintln!("xrandr failed: {}", String::from_utf8_lossy(&out.stderr));
+        return None;
+    }
     let text = String::from_utf8_lossy(&out.stdout);
     let mut modes = Vec::new();
     let mut current = 0usize;
@@ -156,6 +168,10 @@ fn query_resolutions_x11() -> Option<(Vec<String>, usize)> {
 
 fn query_resolutions_wayland() -> Option<(Vec<String>, usize)> {
     let out = Command::new("wlr-randr").output().ok()?;
+    if !out.status.success() {
+        eprintln!("wlr-randr failed: {}", String::from_utf8_lossy(&out.stderr));
+        return None;
+    }
     let text = String::from_utf8_lossy(&out.stdout);
     let mut modes = Vec::new();
     let mut current = 0usize;
