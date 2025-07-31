@@ -5,12 +5,13 @@ use gtk::{Align, Application, ApplicationWindow, Orientation};
 use gtk4 as gtk;
 use gtk4_layer_shell::{self as layer_shell, LayerShell};
 use std::fs;
-use std::path::PathBuf;
+use std::process::Command;
 use std::rc::Rc;
 use std::sync::OnceLock;
 
 static BRIGHTNESS_PATH: OnceLock<String> = OnceLock::new();
 static MAX_BRIGHTNESS: OnceLock<u32> = OnceLock::new();
+static DEFAULT_SINK: OnceLock<String> = OnceLock::new();
 
 fn init_backlight() {
     if MAX_BRIGHTNESS.get().is_some() && BRIGHTNESS_PATH.get().is_some() {
@@ -63,6 +64,27 @@ fn write_brightness(value: u32) {
     } else {
         eprintln!("Backlight brightness path unavailable");
     }
+}
+
+fn default_sink() -> &'static str {
+    DEFAULT_SINK
+        .get_or_init(|| match Command::new("pactl").arg("info").output() {
+            Ok(out) => {
+                if let Ok(text) = String::from_utf8(out.stdout) {
+                    for line in text.lines() {
+                        if let Some(rest) = line.strip_prefix("Default Sink:") {
+                            return rest.trim().to_string();
+                        }
+                    }
+                }
+                "@DEFAULT_SINK@".to_string()
+            }
+            Err(e) => {
+                eprintln!("Failed to run pactl info: {}", e);
+                "@DEFAULT_SINK@".to_string()
+            }
+        })
+        .as_str()
 }
 
 fn build_ui(app: &Application) {
@@ -144,6 +166,30 @@ fn build_ui(app: &Application) {
     let volume = gtk::Scale::with_range(Orientation::Horizontal, 0.0, 100.0, 1.0);
     volume.set_hexpand(true);
     let mute = gtk::ToggleButton::with_label("Mute");
+    let sink = default_sink().to_string();
+    {
+        let sink = sink.clone();
+        volume.connect_value_changed(move |s| {
+            let val = s.value() as i32;
+            if let Err(e) = Command::new("pactl")
+                .args(&["set-sink-volume", &sink, &format!("{}%", val)])
+                .spawn()
+            {
+                eprintln!("Failed to set volume: {}", e);
+            }
+        });
+    }
+    {
+        let sink = sink.clone();
+        mute.connect_toggled(move |_| {
+            if let Err(e) = Command::new("pactl")
+                .args(&["set-sink-mute", &sink, "toggle"])
+                .spawn()
+            {
+                eprintln!("Failed to toggle mute: {}", e);
+            }
+        });
+    }
     row3.append(&volume_label);
     row3.append(&volume);
     row3.append(&mute);
