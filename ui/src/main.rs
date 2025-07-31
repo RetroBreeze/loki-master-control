@@ -106,7 +106,85 @@ fn build_ui(app: &Application) {
 
     vbox.append(&gtk::Separator::new(Orientation::Horizontal));
 
-    vbox.append(&gtk::Label::new(Some("RGB controls (coming soon)")));
+    // RGB Lighting section
+    let rgb_section = gtk::Box::new(Orientation::Vertical, 8);
+
+    let rgb_label = gtk::Label::new(Some("RGB Lighting"));
+    rgb_label.add_css_class("heading");
+    rgb_section.append(&rgb_label);
+    rgb_section.append(&gtk::Separator::new(Orientation::Horizontal));
+
+    let color_row = gtk::Box::new(Orientation::Horizontal, 8);
+    let color_dialog = gtk::ColorDialog::new();
+    let color_button = gtk::ColorDialogButton::new(Some(&color_dialog));
+    color_button.add_css_class("circular");
+    let preview = gtk::Box::new(Orientation::Vertical, 0);
+    preview.set_size_request(24, 24);
+    color_row.append(&color_button);
+    color_row.append(&preview);
+    rgb_section.append(&color_row);
+
+    let advanced_switch = gtk::Switch::new();
+    let advanced_row = gtk::Box::new(Orientation::Horizontal, 8);
+    advanced_row.append(&gtk::Label::new(Some("Advanced sliders")));
+    advanced_row.append(&advanced_switch);
+    rgb_section.append(&advanced_row);
+
+    let sliders = gtk::Box::new(Orientation::Vertical, 4);
+    let red = gtk::Scale::with_range(Orientation::Horizontal, 0.0, 255.0, 1.0);
+    let green = gtk::Scale::with_range(Orientation::Horizontal, 0.0, 255.0, 1.0);
+    let blue = gtk::Scale::with_range(Orientation::Horizontal, 0.0, 255.0, 1.0);
+    for (label, scale) in [("Red:", &red), ("Green:", &green), ("Blue:", &blue)] {
+        let row = gtk::Box::new(Orientation::Horizontal, 4);
+        row.append(&gtk::Label::new(Some(label)));
+        scale.set_hexpand(true);
+        row.append(scale);
+        sliders.append(&row);
+    }
+    sliders.set_visible(false);
+    rgb_section.append(&sliders);
+
+    advanced_switch.connect_state_set(
+        clone!(@weak sliders => @default-return glib::signal::Inhibit(false), move |_, state| {
+            sliders.set_visible(state);
+            glib::signal::Inhibit(false)
+        }),
+    );
+
+    let brightness = gtk::Scale::with_range(Orientation::Horizontal, 0.0, 100.0, 1.0);
+    rgb_section.append(&brightness);
+
+    let effect_label = gtk::Label::new(Some("Effect: Static"));
+    effect_label.set_sensitive(false);
+    rgb_section.append(&effect_label);
+
+    // update preview color when values change
+    let css_provider = gtk::CssProvider::new();
+    preview
+        .style_context()
+        .add_provider(&css_provider, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
+    let update_preview = move |color: gdk4::RGBA| {
+        let css = format!("background-color:{};", color.to_string());
+        css_provider.load_from_data(css.as_bytes()).ok();
+    };
+    update_preview(color_button.rgba());
+    color_button.connect_rgba_notify(clone!(@strong update_preview => move |btn| {
+        update_preview(btn.rgba());
+    }));
+    for scale in [&red, &green, &blue] {
+        scale.connect_value_changed(
+            clone!(@weak color_button => @strong update_preview => move |_| {
+                let mut color = color_button.rgba();
+                color.red = red.value() as f32 / 255.0;
+                color.green = green.value() as f32 / 255.0;
+                color.blue = blue.value() as f32 / 255.0;
+                color_button.set_rgba(&color);
+            }),
+        );
+    }
+
+    rgb_section.set_spacing(8);
+    vbox.append(&rgb_section);
 
     vbox.append(&gtk::Separator::new(Orientation::Horizontal));
 
