@@ -102,10 +102,11 @@ fn rfkill_blocked(kind: &str) -> Option<bool> {
 
 fn is_wayland() -> bool {
     if let Some(display) = gdk::Display::default() {
-        if display.is_wayland() {
+        let backend = display.backend();
+        if backend.is_wayland() {
             return true;
         }
-        if display.is_x11() {
+        if backend.is_x11() {
             return false;
         }
     }
