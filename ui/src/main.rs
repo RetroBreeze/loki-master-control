@@ -13,8 +13,7 @@ use std::sync::OnceLock;
 static BRIGHTNESS_PATH: OnceLock<String> = OnceLock::new();
 static MAX_BRIGHTNESS: OnceLock<u32> = OnceLock::new();
 static DEFAULT_SINK: OnceLock<String> = OnceLock::new();
-static PWM_ENABLE_PATH: OnceLock<String> = OnceLock::new();
-static PWM_PATH: OnceLock<String> = OnceLock::new();
+static PWM_BASE: OnceLock<Option<String>> = OnceLock::new();
 
 fn init_backlight() {
     if MAX_BRIGHTNESS.get().is_some() && BRIGHTNESS_PATH.get().is_some() {
@@ -101,49 +100,27 @@ fn rfkill_blocked(kind: &str) -> Option<bool> {
     None
 }
 
-fn init_pwm() {
-    if PWM_ENABLE_PATH.get().is_some() && PWM_PATH.get().is_some() {
-        return;
-    }
-    let dir_iter = match fs::read_dir("/sys/class/hwmon") {
-        Ok(it) => it,
-        Err(e) => {
-            eprintln!("Failed to read /sys/class/hwmon: {}", e);
-            return;
-        }
-    };
+fn find_aynec_hwmon() -> Option<String> {
+    let dir_iter = fs::read_dir("/sys/class/hwmon").ok()?;
     for entry in dir_iter.flatten() {
         let base = entry.path();
-        let pwm = base.join("pwm1");
-        let enable = base.join("pwm1_enable");
-        if pwm.exists() && enable.exists() {
-            let _ = PWM_PATH.set(pwm.to_string_lossy().into_owned());
-            let _ = PWM_ENABLE_PATH.set(enable.to_string_lossy().into_owned());
-            break;
+        let name = fs::read_to_string(base.join("name")).ok()?;
+        if name.trim() == "aynec" {
+            return Some(base.to_string_lossy().into_owned());
         }
+    }
+    None
+}
+
+fn write_to_sysfs(path: &str, value: impl AsRef<str>) {
+    if let Err(e) = fs::write(path, value.as_ref()) {
+        eprintln!("Failed to write {}: {}", path, e);
     }
 }
 
-fn write_pwm_enable(value: u8) {
-    init_pwm();
-    if let Some(path) = PWM_ENABLE_PATH.get() {
-        if let Err(e) = fs::write(path, value.to_string()) {
-            eprintln!("Failed to write {}: {}", path, e);
-        }
-    } else {
-        eprintln!("Fan pwm1_enable path unavailable");
-    }
-}
-
-fn write_pwm(value: u8) {
-    init_pwm();
-    if let Some(path) = PWM_PATH.get() {
-        if let Err(e) = fs::write(path, value.to_string()) {
-            eprintln!("Failed to write {}: {}", path, e);
-        }
-    } else {
-        eprintln!("Fan pwm1 path unavailable");
-    }
+fn pwm_base() -> Option<&'static str> {
+    PWM_BASE.get_or_init(find_aynec_hwmon);
+    PWM_BASE.get().and_then(|o| o.as_deref())
 }
 
 fn build_ui(app: &Application) {
@@ -374,36 +351,56 @@ fn build_ui(app: &Application) {
         let ms = manual_speed.clone();
         manual.connect_toggled(move |btn| ms.set_visible(btn.is_active()));
     }
-    {
-        silent.connect_toggled(|btn| {
-            if btn.is_active() {
-                write_pwm_enable(0);
-                write_pwm(0);
-            }
-        });
-    }
-    {
-        auto.connect_toggled(|btn| {
-            if btn.is_active() {
-                write_pwm_enable(1);
-            }
-        });
-    }
-    {
-        let ms = manual_speed.clone();
-        manual.connect_toggled(move |btn| {
-            if btn.is_active() {
-                write_pwm_enable(0);
-                let val = ((ms.value() / 100.0) * 255.0).round() as u8;
-                write_pwm(val);
-            }
-        });
-    }
-    {
-        manual_speed.connect_value_changed(|s| {
-            let val = ((s.value() / 100.0) * 255.0).round() as u8;
-            write_pwm(val);
-        });
+
+    let fan_base = pwm_base().map(|s| s.to_string());
+    if let Some(base) = fan_base.clone() {
+        // Silent
+        {
+            let base = base.clone();
+            silent.connect_toggled(move |btn| {
+                if btn.is_active() {
+                    write_to_sysfs(&format!("{}/pwm1_enable", base), "0");
+                    write_to_sysfs(&format!("{}/pwm1", base), "0");
+                }
+            });
+        }
+        // Auto
+        {
+            let base = base.clone();
+            auto.connect_toggled(move |btn| {
+                if btn.is_active() {
+                    write_to_sysfs(&format!("{}/pwm1_enable", base), "1");
+                }
+            });
+        }
+        // Manual
+        {
+            let base = base.clone();
+            let ms = manual_speed.clone();
+            manual.connect_toggled(move |btn| {
+                if btn.is_active() {
+                    write_to_sysfs(&format!("{}/pwm1_enable", base), "0");
+                    let pct = ms.value() / 100.0;
+                    let pwm = (pct * 255.0).round() as u8;
+                    write_to_sysfs(&format!("{}/pwm1", base), pwm.to_string());
+                }
+            });
+        }
+        {
+            let base = base.clone();
+            manual_speed.connect_value_changed(move |s| {
+                let pct = s.value() / 100.0;
+                let pwm = (pct * 255.0).round() as u8;
+                write_to_sysfs(&format!("{}/pwm1_enable", base), "0");
+                write_to_sysfs(&format!("{}/pwm1", base), pwm.to_string());
+            });
+        }
+    } else {
+        eprintln!("aynec hwmon device not found; disabling fan controls");
+        silent.set_sensitive(false);
+        auto.set_sensitive(false);
+        manual.set_sensitive(false);
+        manual_speed.set_sensitive(false);
     }
     vbox.append(&manual_speed);
 
