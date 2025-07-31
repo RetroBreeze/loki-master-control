@@ -5,6 +5,7 @@ use gtk::{Align, Application, ApplicationWindow, Orientation};
 use gtk4 as gtk;
 use gtk4_layer_shell::{self as layer_shell, LayerShell};
 use std::cell::RefCell;
+use std::env;
 use std::fs;
 use std::process::Command;
 use std::rc::Rc;
@@ -100,6 +101,13 @@ fn rfkill_blocked(kind: &str) -> Option<bool> {
     None
 }
 
+fn is_wayland() -> bool {
+    match env::var("XDG_SESSION_TYPE") {
+        Ok(v) if v.eq_ignore_ascii_case("wayland") => true,
+        _ => env::var("WAYLAND_DISPLAY").is_ok(),
+    }
+}
+
 fn gcd(mut a: u32, mut b: u32) -> u32 {
     while b != 0 {
         let t = b;
@@ -117,7 +125,7 @@ fn aspect_ratio(mode: &str) -> Option<String> {
     Some(format!("{}:{}", w / g, h / g))
 }
 
-fn query_resolutions() -> Option<(Vec<String>, usize)> {
+fn query_resolutions_x11() -> Option<(Vec<String>, usize)> {
     let out = Command::new("xrandr").output().ok()?;
     let text = String::from_utf8_lossy(&out.stdout);
     let mut modes = Vec::new();
@@ -144,6 +152,88 @@ fn query_resolutions() -> Option<(Vec<String>, usize)> {
         None
     } else {
         Some((modes, current))
+    }
+}
+
+fn query_resolutions_wayland() -> Option<(Vec<String>, usize)> {
+    let out = Command::new("wlr-randr").output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut modes = Vec::new();
+    let mut current = 0usize;
+    let mut found = false;
+    for line in text.lines() {
+        if line.starts_with(OUTPUT_NAME) || line.starts_with(&format!("Output {}", OUTPUT_NAME)) {
+            found = true;
+            continue;
+        }
+        if found {
+            let trimmed = line.trim_start();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if !line.starts_with(' ') {
+                break;
+            }
+            if trimmed.starts_with("Mode:") {
+                if let Some(mode_part) = trimmed.split_whitespace().nth(1) {
+                    modes.push(mode_part.split('@').next().unwrap_or(mode_part).to_string());
+                    current = modes.len() - 1;
+                }
+            } else if trimmed
+                .chars()
+                .next()
+                .map(|c| c.is_digit(10))
+                .unwrap_or(false)
+            {
+                let mode_part = trimmed.split('@').next().unwrap_or(trimmed);
+                modes.push(mode_part.to_string());
+            }
+        }
+    }
+    if modes.is_empty() {
+        None
+    } else {
+        Some((modes, current))
+    }
+}
+
+fn query_resolutions() -> Option<(Vec<String>, usize)> {
+    if is_wayland() {
+        query_resolutions_wayland().or_else(query_resolutions_x11)
+    } else {
+        query_resolutions_x11()
+    }
+}
+
+fn set_resolution(mode: &str) {
+    let cmd = if is_wayland() { "wlr-randr" } else { "xrandr" };
+    let args = ["--output", OUTPUT_NAME, "--mode", mode];
+    if let Err(e) = Command::new(cmd).args(&args).spawn() {
+        eprintln!("Failed to set resolution: {}", e);
+    }
+}
+
+fn set_refresh_rate(mode: &str, rate: u32) {
+    if is_wayland() {
+        let mode_rate = format!("{}@{}", mode, rate);
+        if let Err(e) = Command::new("wlr-randr")
+            .args(&["--output", OUTPUT_NAME, "--mode", &mode_rate])
+            .spawn()
+        {
+            eprintln!("Failed to set refresh rate: {}", e);
+        }
+    } else if let Err(e) = Command::new("xrandr")
+        .args(&[
+            "--output",
+            OUTPUT_NAME,
+            "--mode",
+            mode,
+            "--rate",
+            &rate.to_string(),
+        ])
+        .spawn()
+    {
+        eprintln!("Failed to set refresh rate: {}", e);
     }
 }
 
@@ -330,12 +420,7 @@ fn build_ui(app: &Application) {
             let idx = dd.selected() as usize;
             if let Some(mode) = modes.get(idx) {
                 *cur.borrow_mut() = mode.clone();
-                if let Err(e) = Command::new("xrandr")
-                    .args(&["--output", OUTPUT_NAME, "--mode", mode])
-                    .spawn()
-                {
-                    eprintln!("Failed to set resolution: {}", e);
-                }
+                set_resolution(mode);
             }
         });
     }
@@ -348,19 +433,7 @@ fn build_ui(app: &Application) {
             let cur = current_mode.clone();
             btn.connect_clicked(move |_| {
                 let mode = cur.borrow().clone();
-                if let Err(e) = Command::new("xrandr")
-                    .args(&[
-                        "--output",
-                        OUTPUT_NAME,
-                        "--mode",
-                        &mode,
-                        "--rate",
-                        &hz.to_string(),
-                    ])
-                    .spawn()
-                {
-                    eprintln!("Failed to set refresh rate: {}", e);
-                }
+                set_refresh_rate(&mode, hz);
             });
         }
         row5.append(&btn);
