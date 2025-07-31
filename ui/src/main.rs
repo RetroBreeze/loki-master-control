@@ -132,14 +132,6 @@ fn gcd(mut a: u32, mut b: u32) -> u32 {
     a
 }
 
-fn command_exists(cmd: &str) -> bool {
-    Command::new("sh")
-        .args(["-c", &format!("command -v {} >/dev/null 2>&1", cmd)])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
 fn aspect_ratio(mode: &str) -> Option<String> {
     let mut it = mode.split('x');
     let w = it.next()?.parse::<u32>().ok()?;
@@ -201,17 +193,21 @@ fn query_resolutions_x11() -> Option<(Vec<String>, usize)> {
 
 fn detect_wayland_output(text: &str) -> Option<String> {
     for line in text.lines() {
-        if !line.starts_with(' ') && !line.trim().is_empty() {
-            return Some(line.trim().split_whitespace().next()?.to_string());
+        if line.contains(" connected") {
+            for word in line.split_whitespace() {
+                if word.contains('-') {
+                    return Some(word.to_string());
+                }
+            }
         }
     }
     None
 }
 
 fn query_resolutions_wayland() -> Option<(Vec<String>, usize)> {
-    let out = Command::new("wlr-randr").output().ok()?;
+    let out = Command::new("kscreen-doctor").arg("-o").output().ok()?;
     if !out.status.success() {
-        eprintln!("wlr-randr failed: {}", String::from_utf8_lossy(&out.stderr));
+        eprintln!("kscreen-doctor failed: {}", String::from_utf8_lossy(&out.stderr));
         return None;
     }
     let text = String::from_utf8_lossy(&out.stdout);
@@ -225,31 +221,23 @@ fn query_resolutions_wayland() -> Option<(Vec<String>, usize)> {
     let mut current = 0usize;
     let mut found = false;
     for line in text.lines() {
-        if line.starts_with(name) || line.starts_with(&format!("Output {}", name)) {
+        if line.contains(name) && line.contains("Mode") {
             found = true;
-            continue;
-        }
-        if found {
-            let trimmed = line.trim_start();
-            if trimmed.is_empty() {
-                continue;
-            }
-            if !line.starts_with(' ') {
+        } else if found {
+            if line.trim().is_empty() {
                 break;
             }
-            if trimmed.starts_with("Mode:") {
-                if let Some(mode_part) = trimmed.split_whitespace().nth(1) {
-                    modes.push(mode_part.split('@').next().unwrap_or(mode_part).to_string());
-                    current = modes.len() - 1;
+            for part in line.split_whitespace() {
+                if let Some(mode) = part.split('@').next() {
+                    if mode.contains('x') {
+                        if !modes.contains(&mode.to_string()) {
+                            modes.push(mode.to_string());
+                        }
+                        if part.contains("current") || part.contains('*') {
+                            current = modes.len() - 1;
+                        }
+                    }
                 }
-            } else if trimmed
-                .chars()
-                .next()
-                .map(|c| c.is_ascii_digit())
-                .unwrap_or(false)
-            {
-                let mode_part = trimmed.split('@').next().unwrap_or(trimmed);
-                modes.push(mode_part.to_string());
             }
         }
     }
@@ -261,7 +249,7 @@ fn query_resolutions_wayland() -> Option<(Vec<String>, usize)> {
 }
 
 fn query_resolutions() -> Option<(Vec<String>, usize)> {
-    if is_wayland() && command_exists("wlr-randr") {
+    if is_wayland() {
         query_resolutions_wayland().or_else(query_resolutions_x11)
     } else {
         query_resolutions_x11()
@@ -271,9 +259,10 @@ fn query_resolutions() -> Option<(Vec<String>, usize)> {
 fn set_resolution(mode: &str) {
     let name = output_name();
     let args = ["--output", name, "--mode", mode];
-    if is_wayland() && command_exists("wlr-randr") {
-        if let Err(e) = Command::new("wlr-randr").args(&args).spawn() {
-            eprintln!("Failed to set resolution with wlr-randr: {}", e);
+    if is_wayland() {
+        let arg = format!("output.{}.mode.{}", name, mode);
+        if let Err(e) = Command::new("kscreen-doctor").arg(&arg).spawn() {
+            eprintln!("Failed to set resolution with kscreen-doctor: {}", e);
         }
     } else if let Err(e) = Command::new("xrandr").args(&args).spawn() {
         eprintln!("Failed to set resolution: {}", e);
@@ -282,13 +271,10 @@ fn set_resolution(mode: &str) {
 
 fn set_refresh_rate(mode: &str, rate: u32) {
     let name = output_name();
-    if is_wayland() && command_exists("wlr-randr") {
-        let mode_rate = format!("{}@{}", mode, rate);
-        if let Err(e) = Command::new("wlr-randr")
-            .args(&["--output", name, "--mode", &mode_rate])
-            .spawn()
-        {
-            eprintln!("Failed to set refresh rate with wlr-randr: {}", e);
+    if is_wayland() {
+        let arg = format!("output.{}.mode.{}@{}", name, mode, rate);
+        if let Err(e) = Command::new("kscreen-doctor").arg(&arg).spawn() {
+            eprintln!("Failed to set refresh rate with kscreen-doctor: {}", e);
         }
     } else if let Err(e) = Command::new("xrandr")
         .args(&[
