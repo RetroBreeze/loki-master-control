@@ -1,5 +1,4 @@
 use gtk::gdk;
-use gtk::glib;
 use gtk::prelude::*;
 use gtk::{Align, Application, ApplicationWindow, Orientation};
 use gtk4 as gtk;
@@ -406,7 +405,8 @@ fn build_ui(app: &Application) {
             format!("{} ({})", m, ratio)
         })
         .collect();
-    let res_combo = gtk::DropDown::from_strings(&display_modes);
+    let display_refs: Vec<&str> = display_modes.iter().map(|s| s.as_str()).collect();
+    let res_combo = gtk::DropDown::from_strings(&display_refs);
     res_combo.set_selected(cur_idx as u32);
     row4.append(&gtk::Label::new(Some("Resolution:")));
     row4.append(&res_combo);
