@@ -4,6 +4,7 @@ use gtk::prelude::*;
 use gtk::{Align, Application, ApplicationWindow, Orientation};
 use gtk4 as gtk;
 use gtk4_layer_shell::{self as layer_shell, LayerShell};
+use std::cell::RefCell;
 use std::fs;
 use std::process::Command;
 use std::rc::Rc;
@@ -12,6 +13,7 @@ use std::sync::OnceLock;
 static BRIGHTNESS_PATH: OnceLock<String> = OnceLock::new();
 static MAX_BRIGHTNESS: OnceLock<u32> = OnceLock::new();
 static DEFAULT_SINK: OnceLock<String> = OnceLock::new();
+const OUTPUT_NAME: &str = "eDP-1";
 
 fn init_backlight() {
     if MAX_BRIGHTNESS.get().is_some() && BRIGHTNESS_PATH.get().is_some() {
@@ -98,6 +100,53 @@ fn rfkill_blocked(kind: &str) -> Option<bool> {
     None
 }
 
+fn gcd(mut a: u32, mut b: u32) -> u32 {
+    while b != 0 {
+        let t = b;
+        b = a % t;
+        a = t;
+    }
+    a
+}
+
+fn aspect_ratio(mode: &str) -> Option<String> {
+    let mut it = mode.split('x');
+    let w = it.next()?.parse::<u32>().ok()?;
+    let h = it.next()?.parse::<u32>().ok()?;
+    let g = gcd(w, h);
+    Some(format!("{}:{}", w / g, h / g))
+}
+
+fn query_resolutions() -> Option<(Vec<String>, usize)> {
+    let out = Command::new("xrandr").output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut modes = Vec::new();
+    let mut current = 0usize;
+    let mut found = false;
+    for line in text.lines() {
+        if line.starts_with(OUTPUT_NAME) {
+            found = true;
+            continue;
+        }
+        if found {
+            if !line.starts_with(' ') {
+                break;
+            }
+            if let Some(mode) = line.split_whitespace().next() {
+                modes.push(mode.to_string());
+                if line.contains('*') {
+                    current = modes.len() - 1;
+                }
+            }
+        }
+    }
+    if modes.is_empty() {
+        None
+    } else {
+        Some((modes, current))
+    }
+}
+
 fn build_ui(app: &Application) {
     // Main window setup
     let window = ApplicationWindow::builder()
@@ -167,7 +216,10 @@ fn build_ui(app: &Application) {
     }
     {
         bt_btn.connect_toggled(|_| {
-            if let Err(e) = Command::new("rfkill").args(&["toggle", "bluetooth"]).spawn() {
+            if let Err(e) = Command::new("rfkill")
+                .args(&["toggle", "bluetooth"])
+                .spawn()
+            {
                 eprintln!("Failed to toggle Bluetooth: {}", e);
             }
         });
@@ -182,7 +234,11 @@ fn build_ui(app: &Application) {
     }
     {
         airplane_btn.connect_toggled(|btn| {
-            let args = if btn.is_active() { vec!["block", "all"] } else { vec!["unblock", "all"] };
+            let args = if btn.is_active() {
+                vec!["block", "all"]
+            } else {
+                vec!["unblock", "all"]
+            };
             if let Err(e) = Command::new("rfkill").args(&args).spawn() {
                 eprintln!("Failed to toggle airplane mode: {}", e);
             }
@@ -252,15 +308,62 @@ fn build_ui(app: &Application) {
 
     // Row 4: Resolution dropdown
     let row4 = gtk::Box::new(Orientation::Horizontal, 8);
-    let res_combo = gtk::DropDown::from_strings(&["1080p", "720p"]);
+    let (modes, cur_idx) = query_resolutions().unwrap_or_else(|| (vec!["1920x1080".into()], 0));
+    let display_modes: Vec<String> = modes
+        .iter()
+        .map(|m| {
+            let ratio = aspect_ratio(m).unwrap_or_default();
+            format!("{} ({})", m, ratio)
+        })
+        .collect();
+    let res_combo = gtk::DropDown::from_strings(&display_modes);
+    res_combo.set_selected(cur_idx as u32);
     row4.append(&gtk::Label::new(Some("Resolution:")));
     row4.append(&res_combo);
     vbox.append(&row4);
 
+    let current_mode = Rc::new(RefCell::new(modes[cur_idx].clone()));
+    {
+        let modes = modes.clone();
+        let cur = current_mode.clone();
+        res_combo.connect_selected_notify(move |dd| {
+            let idx = dd.selected() as usize;
+            if let Some(mode) = modes.get(idx) {
+                *cur.borrow_mut() = mode.clone();
+                if let Err(e) = Command::new("xrandr")
+                    .args(&["--output", OUTPUT_NAME, "--mode", mode])
+                    .spawn()
+                {
+                    eprintln!("Failed to set resolution: {}", e);
+                }
+            }
+        });
+    }
+
     // Row 5: Refresh rate buttons
     let row5 = gtk::Box::new(Orientation::Horizontal, 8);
-    for hz in ["40Hz", "50Hz", "60Hz"] {
-        row5.append(&gtk::Button::with_label(hz));
+    for hz in [40, 50, 60] {
+        let btn = gtk::Button::with_label(&format!("{}Hz", hz));
+        {
+            let cur = current_mode.clone();
+            btn.connect_clicked(move |_| {
+                let mode = cur.borrow().clone();
+                if let Err(e) = Command::new("xrandr")
+                    .args(&[
+                        "--output",
+                        OUTPUT_NAME,
+                        "--mode",
+                        &mode,
+                        "--rate",
+                        &hz.to_string(),
+                    ])
+                    .spawn()
+                {
+                    eprintln!("Failed to set refresh rate: {}", e);
+                }
+            });
+        }
+        row5.append(&btn);
     }
     vbox.append(&row5);
 
