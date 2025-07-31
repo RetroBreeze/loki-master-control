@@ -861,6 +861,7 @@ dependencies = [
  "glib 0.18.5",
  "gtk4",
  "gtk4-layer-shell",
+ "libc",
 ]
 
 [[package]]

@@ -4,6 +4,7 @@ use gtk::prelude::*;
 use gtk::{Align, Application, ApplicationWindow, Orientation};
 use gtk4 as gtk;
 use gtk4_layer_shell::{self as layer_shell, LayerShell};
+use libc;
 use std::fs;
 use std::process::Command;
 use std::rc::Rc;
@@ -167,7 +168,10 @@ fn build_ui(app: &Application) {
     }
     {
         bt_btn.connect_toggled(|_| {
-            if let Err(e) = Command::new("rfkill").args(&["toggle", "bluetooth"]).spawn() {
+            if let Err(e) = Command::new("rfkill")
+                .args(&["toggle", "bluetooth"])
+                .spawn()
+            {
                 eprintln!("Failed to toggle Bluetooth: {}", e);
             }
         });
@@ -182,7 +186,11 @@ fn build_ui(app: &Application) {
     }
     {
         airplane_btn.connect_toggled(|btn| {
-            let args = if btn.is_active() { vec!["block", "all"] } else { vec!["unblock", "all"] };
+            let args = if btn.is_active() {
+                vec!["block", "all"]
+            } else {
+                vec!["unblock", "all"]
+            };
             if let Err(e) = Command::new("rfkill").args(&args).spawn() {
                 eprintln!("Failed to toggle airplane mode: {}", e);
             }
@@ -272,13 +280,27 @@ fn build_ui(app: &Application) {
     let tdp_label = gtk::Label::new(Some("TDP (W):"));
     let tdp = gtk::Scale::with_range(Orientation::Horizontal, 5.0, 28.0, 1.0);
     tdp.set_value(15.0);
+    tdp.set_hexpand(true);
     let tdp_value = gtk::Label::new(Some(&format!("{} W", tdp.value() as i32)));
     {
         let tdp_value_cl = tdp_value.clone();
         tdp.connect_value_changed(move |s| {
-            let v = s.value().round();
-            s.set_value(v);
-            tdp_value_cl.set_text(&format!("{} W", v as i32));
+            let w = s.value().round() as i32;
+            s.set_value(w as f64);
+            tdp_value_cl.set_text(&format!("{} W", w));
+
+            let stapm = format!("{}000", w);
+            let mut cmd = if unsafe { libc::geteuid() } == 0 {
+                Command::new("ryzenadj")
+            } else {
+                let mut c = Command::new("sudo");
+                c.arg("ryzenadj");
+                c
+            };
+            cmd.args(&["--stapm-limit", &stapm]);
+            if let Err(e) = cmd.spawn() {
+                eprintln!("Failed to run ryzenadj: {}", e);
+            }
         });
     }
     row6.append(&tdp_label);
