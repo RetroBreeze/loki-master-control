@@ -123,6 +123,7 @@ fn build_ui(app: &Application) {
     let bright_label = gtk::Label::new(Some("Brightness:"));
     let brightness = gtk::Scale::with_range(Orientation::Horizontal, 0.0, 100.0, 1.0);
     brightness.set_value(50.0);
+    brightness.set_hexpand(true);
     let max_brightness = read_max_brightness();
     {
         let max_brightness = max_brightness;
