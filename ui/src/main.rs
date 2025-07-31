@@ -1,10 +1,69 @@
-use gtk4 as gtk;
-use gtk::prelude::*;
-use gtk::{Align, Application, ApplicationWindow, Orientation};
 use gtk::gdk;
 use gtk::glib;
-use std::rc::Rc;
+use gtk::prelude::*;
+use gtk::{Align, Application, ApplicationWindow, Orientation};
+use gtk4 as gtk;
 use gtk4_layer_shell::{self as layer_shell, LayerShell};
+use std::fs;
+use std::path::PathBuf;
+use std::rc::Rc;
+use std::sync::OnceLock;
+
+static BRIGHTNESS_PATH: OnceLock<String> = OnceLock::new();
+static MAX_BRIGHTNESS: OnceLock<u32> = OnceLock::new();
+
+fn init_backlight() {
+    if MAX_BRIGHTNESS.get().is_some() && BRIGHTNESS_PATH.get().is_some() {
+        return;
+    }
+    let dir_iter = match fs::read_dir("/sys/class/backlight") {
+        Ok(it) => it,
+        Err(e) => {
+            eprintln!("Failed to read /sys/class/backlight: {}", e);
+            return;
+        }
+    };
+    let entry = match dir_iter.into_iter().next() {
+        Some(Ok(e)) => e.path(),
+        Some(Err(e)) => {
+            eprintln!("Error reading backlight entry: {}", e);
+            return;
+        }
+        None => {
+            eprintln!("No backlight device found");
+            return;
+        }
+    };
+
+    let max_path = entry.join("max_brightness");
+    match fs::read_to_string(&max_path) {
+        Ok(s) => match s.trim().parse::<u32>() {
+            Ok(v) => {
+                let _ = MAX_BRIGHTNESS.set(v);
+                let _ =
+                    BRIGHTNESS_PATH.set(entry.join("brightness").to_string_lossy().into_owned());
+            }
+            Err(e) => eprintln!("Failed to parse {}: {}", max_path.display(), e),
+        },
+        Err(e) => eprintln!("Failed to read {}: {}", max_path.display(), e),
+    }
+}
+
+fn read_max_brightness() -> u32 {
+    init_backlight();
+    MAX_BRIGHTNESS.get().copied().unwrap_or(100)
+}
+
+fn write_brightness(value: u32) {
+    init_backlight();
+    if let Some(path) = BRIGHTNESS_PATH.get() {
+        if let Err(e) = fs::write(path, value.to_string()) {
+            eprintln!("Failed to write {}: {}", path, e);
+        }
+    } else {
+        eprintln!("Backlight brightness path unavailable");
+    }
+}
 
 fn build_ui(app: &Application) {
     // Main window setup
@@ -64,6 +123,16 @@ fn build_ui(app: &Application) {
     let bright_label = gtk::Label::new(Some("Brightness:"));
     let brightness = gtk::Scale::with_range(Orientation::Horizontal, 0.0, 100.0, 1.0);
     brightness.set_value(50.0);
+    brightness.set_hexpand(true);
+    let max_brightness = read_max_brightness();
+    {
+        let max_brightness = max_brightness;
+        brightness.connect_value_changed(move |s| {
+            let pct = s.value() / 100.0;
+            let val = (pct * max_brightness as f64).round() as u32;
+            write_brightness(val);
+        });
+    }
     row2.append(&bright_label);
     row2.append(&brightness);
     vbox.append(&row2);
@@ -201,7 +270,10 @@ fn build_ui(app: &Application) {
     let update_preview = {
         let prov = css_provider.clone();
         Rc::new(move |color: gtk::gdk::RGBA| {
-            let css = format!(".rgb-preview {{ background-color: {}; }}", color.to_string());
+            let css = format!(
+                ".rgb-preview {{ background-color: {}; }}",
+                color.to_string()
+            );
             prov.load_from_data(&css);
         })
     };
