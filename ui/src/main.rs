@@ -145,9 +145,9 @@ fn build_ui(app: &Application) {
     rgb_section.append(&sliders);
 
     advanced_switch.connect_state_set(
-        clone!(@weak sliders => @default-return glib::signal::Inhibit(false), move |_, state| {
+        clone!(@weak sliders => @default-return glib::Propagation::Proceed, move |_, state| {
             sliders.set_visible(state);
-            glib::signal::Inhibit(false)
+            glib::Propagation::Proceed
         }),
     );
 
@@ -165,7 +165,7 @@ fn build_ui(app: &Application) {
         .add_provider(&css_provider, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
     let update_preview = move |color: gdk4::RGBA| {
         let css = format!("background-color:{};", color.to_string());
-        css_provider.load_from_data(css.as_bytes()).ok();
+        css_provider.load_from_data(&css);
     };
     update_preview(color_button.rgba());
     color_button.connect_rgba_notify(clone!(@strong update_preview => move |btn| {
@@ -173,7 +173,7 @@ fn build_ui(app: &Application) {
     }));
     for scale in [&red, &green, &blue] {
         scale.connect_value_changed(
-            clone!(@weak color_button => @strong update_preview => move |_| {
+            clone!(@weak color_button, @strong update_preview => move |_| {
                 let mut color = color_button.rgba();
                 color.red = red.value() as f32 / 255.0;
                 color.green = green.value() as f32 / 255.0;
