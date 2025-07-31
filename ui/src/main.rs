@@ -13,7 +13,14 @@ use std::sync::OnceLock;
 static BRIGHTNESS_PATH: OnceLock<String> = OnceLock::new();
 static MAX_BRIGHTNESS: OnceLock<u32> = OnceLock::new();
 static DEFAULT_SINK: OnceLock<String> = OnceLock::new();
-const OUTPUT_NAME: &str = "eDP-1";
+static OUTPUT_NAME: OnceLock<String> = OnceLock::new();
+const DEFAULT_OUTPUT_NAME: &str = "eDP-1";
+
+fn output_name() -> &'static str {
+    OUTPUT_NAME
+        .get_or_init(|| DEFAULT_OUTPUT_NAME.to_string())
+        .as_str()
+}
 
 fn init_backlight() {
     if MAX_BRIGHTNESS.get().is_some() && BRIGHTNESS_PATH.get().is_some() {
@@ -125,12 +132,31 @@ fn gcd(mut a: u32, mut b: u32) -> u32 {
     a
 }
 
+fn command_exists(cmd: &str) -> bool {
+    Command::new("sh")
+        .args(["-c", &format!("command -v {} >/dev/null 2>&1", cmd)])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
 fn aspect_ratio(mode: &str) -> Option<String> {
     let mut it = mode.split('x');
     let w = it.next()?.parse::<u32>().ok()?;
     let h = it.next()?.parse::<u32>().ok()?;
     let g = gcd(w, h);
     Some(format!("{}:{}", w / g, h / g))
+}
+
+fn detect_x11_output(text: &str) -> Option<String> {
+    for line in text.lines() {
+        if line.contains(" connected") {
+            if let Some(name) = line.split_whitespace().next() {
+                return Some(name.to_string());
+            }
+        }
+    }
+    None
 }
 
 fn query_resolutions_x11() -> Option<(Vec<String>, usize)> {
@@ -140,11 +166,17 @@ fn query_resolutions_x11() -> Option<(Vec<String>, usize)> {
         return None;
     }
     let text = String::from_utf8_lossy(&out.stdout);
+    if OUTPUT_NAME.get().is_none() {
+        if let Some(name) = detect_x11_output(&text) {
+            let _ = OUTPUT_NAME.set(name);
+        }
+    }
+    let name = output_name();
     let mut modes = Vec::new();
     let mut current = 0usize;
     let mut found = false;
     for line in text.lines() {
-        if line.starts_with(OUTPUT_NAME) {
+        if line.starts_with(name) {
             found = true;
             continue;
         }
@@ -167,6 +199,15 @@ fn query_resolutions_x11() -> Option<(Vec<String>, usize)> {
     }
 }
 
+fn detect_wayland_output(text: &str) -> Option<String> {
+    for line in text.lines() {
+        if !line.starts_with(' ') && !line.trim().is_empty() {
+            return Some(line.trim().split_whitespace().next()?.to_string());
+        }
+    }
+    None
+}
+
 fn query_resolutions_wayland() -> Option<(Vec<String>, usize)> {
     let out = Command::new("wlr-randr").output().ok()?;
     if !out.status.success() {
@@ -174,11 +215,17 @@ fn query_resolutions_wayland() -> Option<(Vec<String>, usize)> {
         return None;
     }
     let text = String::from_utf8_lossy(&out.stdout);
+    if OUTPUT_NAME.get().is_none() {
+        if let Some(name) = detect_wayland_output(&text) {
+            let _ = OUTPUT_NAME.set(name);
+        }
+    }
+    let name = output_name();
     let mut modes = Vec::new();
     let mut current = 0usize;
     let mut found = false;
     for line in text.lines() {
-        if line.starts_with(OUTPUT_NAME) || line.starts_with(&format!("Output {}", OUTPUT_NAME)) {
+        if line.starts_with(name) || line.starts_with(&format!("Output {}", name)) {
             found = true;
             continue;
         }
@@ -198,7 +245,7 @@ fn query_resolutions_wayland() -> Option<(Vec<String>, usize)> {
             } else if trimmed
                 .chars()
                 .next()
-                .map(|c| c.is_digit(10))
+                .map(|c| c.is_ascii_digit())
                 .unwrap_or(false)
             {
                 let mode_part = trimmed.split('@').next().unwrap_or(trimmed);
@@ -214,7 +261,7 @@ fn query_resolutions_wayland() -> Option<(Vec<String>, usize)> {
 }
 
 fn query_resolutions() -> Option<(Vec<String>, usize)> {
-    if is_wayland() {
+    if is_wayland() && command_exists("wlr-randr") {
         query_resolutions_wayland().or_else(query_resolutions_x11)
     } else {
         query_resolutions_x11()
@@ -222,26 +269,31 @@ fn query_resolutions() -> Option<(Vec<String>, usize)> {
 }
 
 fn set_resolution(mode: &str) {
-    let cmd = if is_wayland() { "wlr-randr" } else { "xrandr" };
-    let args = ["--output", OUTPUT_NAME, "--mode", mode];
-    if let Err(e) = Command::new(cmd).args(&args).spawn() {
+    let name = output_name();
+    let args = ["--output", name, "--mode", mode];
+    if is_wayland() && command_exists("wlr-randr") {
+        if let Err(e) = Command::new("wlr-randr").args(&args).spawn() {
+            eprintln!("Failed to set resolution with wlr-randr: {}", e);
+        }
+    } else if let Err(e) = Command::new("xrandr").args(&args).spawn() {
         eprintln!("Failed to set resolution: {}", e);
     }
 }
 
 fn set_refresh_rate(mode: &str, rate: u32) {
-    if is_wayland() {
+    let name = output_name();
+    if is_wayland() && command_exists("wlr-randr") {
         let mode_rate = format!("{}@{}", mode, rate);
         if let Err(e) = Command::new("wlr-randr")
-            .args(&["--output", OUTPUT_NAME, "--mode", &mode_rate])
+            .args(&["--output", name, "--mode", &mode_rate])
             .spawn()
         {
-            eprintln!("Failed to set refresh rate: {}", e);
+            eprintln!("Failed to set refresh rate with wlr-randr: {}", e);
         }
     } else if let Err(e) = Command::new("xrandr")
         .args(&[
             "--output",
-            OUTPUT_NAME,
+            name,
             "--mode",
             mode,
             "--rate",
