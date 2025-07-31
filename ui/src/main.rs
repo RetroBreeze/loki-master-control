@@ -280,6 +280,7 @@ fn build_ui(app: &Application) {
     let tdp_label = gtk::Label::new(Some("TDP (W):"));
     let tdp = gtk::Scale::with_range(Orientation::Horizontal, 5.0, 28.0, 1.0);
     tdp.set_value(15.0);
+    tdp.set_hexpand(true);
     let tdp_value = gtk::Label::new(Some(&format!("{} W", tdp.value() as i32)));
     {
         let tdp_value_cl = tdp_value.clone();
