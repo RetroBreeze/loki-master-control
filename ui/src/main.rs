@@ -410,7 +410,7 @@ fn build_ui(app: &Application) {
             auto.connect_toggled(move |btn| {
                 if btn.is_active() {
                     eprintln!("Auto mode active");
-                    write_to_sysfs(&format!("{}/pwm1_enable", base), "1");
+                    write_to_sysfs(&format!("{}/pwm1_enable", base), "0");
                 }
             });
         }
@@ -421,7 +421,7 @@ fn build_ui(app: &Application) {
             manual.connect_toggled(move |btn| {
                 if btn.is_active() {
                     eprintln!("Manual mode active");
-                    write_to_sysfs(&format!("{}/pwm1_enable", base), "0");
+                    write_to_sysfs(&format!("{}/pwm1_enable", base), "1");
                     let pct = ms.value() / 100.0;
                     let pwm = (pct * 255.0).round() as u8;
                     write_to_sysfs(&format!("{}/pwm1", base), pwm.to_string());
@@ -438,7 +438,7 @@ fn build_ui(app: &Application) {
                 let pct = s.value();
                 let pwm = ((pct / 100.0) * 255.0).round() as u8;
                 eprintln!("Manual speed {}% -> {}", pct, pwm);
-                write_to_sysfs(&format!("{}/pwm1_enable", base), "0");
+                write_to_sysfs(&format!("{}/pwm1_enable", base), "1");
                 write_to_sysfs(&format!("{}/pwm1", base), pwm.to_string());
             });
         }
