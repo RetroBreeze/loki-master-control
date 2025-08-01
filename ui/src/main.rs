@@ -13,6 +13,7 @@ use std::sync::OnceLock;
 static BRIGHTNESS_PATH: OnceLock<String> = OnceLock::new();
 static MAX_BRIGHTNESS: OnceLock<u32> = OnceLock::new();
 static DEFAULT_SINK: OnceLock<String> = OnceLock::new();
+static PWM_BASE: OnceLock<Option<String>> = OnceLock::new();
 
 fn init_backlight() {
     if MAX_BRIGHTNESS.get().is_some() && BRIGHTNESS_PATH.get().is_some() {
@@ -97,6 +98,67 @@ fn rfkill_blocked(kind: &str) -> Option<bool> {
         }
     }
     None
+}
+
+fn find_aynec_hwmon() -> Option<String> {
+    eprintln!("Scanning /sys/class/hwmon for aynec...");
+    let dir_iter = match fs::read_dir("/sys/class/hwmon") {
+        Ok(it) => it,
+        Err(e) => {
+            eprintln!("Failed to read /sys/class/hwmon: {}", e);
+            return None;
+        }
+    };
+
+    for entry in dir_iter.flatten() {
+        let base = entry.path();
+        match fs::read_to_string(base.join("name")) {
+            Ok(name) => {
+                let trimmed = name.trim();
+                eprintln!(" - {} -> {}", base.display(), trimmed);
+                if trimmed == "aynec" {
+                    let path = base.to_string_lossy().into_owned();
+                    eprintln!("Found aynec hwmon at {}", path);
+                    return Some(path);
+                }
+            }
+            Err(e) => {
+                eprintln!("Failed to read {}/name: {}", base.display(), e);
+            }
+        }
+    }
+
+    eprintln!("aynec hwmon device not found");
+    None
+}
+
+fn write_to_sysfs(path: &str, value: impl AsRef<str>) {
+    let val = value.as_ref();
+    match fs::write(path, val) {
+        Ok(()) => {
+            eprintln!("wrote '{}' -> {}", val, path);
+            match fs::read_to_string(path) {
+                Ok(new_val) => {
+                    eprintln!("  read back: {}", new_val.trim());
+                }
+                Err(e) => {
+                    eprintln!("  failed to read back {}: {}", path, e);
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("Failed to write '{}' to {}: {}", val, path, e);
+        }
+    }
+}
+
+fn pwm_base() -> Option<&'static str> {
+    PWM_BASE.get_or_init(find_aynec_hwmon);
+    let base = PWM_BASE.get().and_then(|o| o.as_deref());
+    if let Some(b) = base {
+        eprintln!("Using hwmon base {}", b);
+    }
+    base
 }
 
 fn build_ui(app: &Application) {
@@ -310,12 +372,9 @@ fn build_ui(app: &Application) {
 
     // Row 7: Fan profile radio‐style
     let row7 = gtk::Box::new(Orientation::Horizontal, 8);
-    let silent = gtk::CheckButton::with_label("Silent");
     let auto = gtk::CheckButton::with_label("Auto");
     let manual = gtk::CheckButton::with_label("Manual");
-    auto.set_group(Some(&silent));
-    manual.set_group(Some(&silent));
-    row7.append(&silent);
+    manual.set_group(Some(&auto));
     row7.append(&auto);
     row7.append(&manual);
     vbox.append(&row7);
@@ -326,6 +385,54 @@ fn build_ui(app: &Application) {
     {
         let ms = manual_speed.clone();
         manual.connect_toggled(move |btn| ms.set_visible(btn.is_active()));
+    }
+
+    let fan_base = pwm_base().map(|s| s.to_string());
+    if let Some(base) = fan_base.clone() {
+        eprintln!("Fan control base: {}", base);
+        // Auto
+        {
+            let base = base.clone();
+            auto.connect_toggled(move |btn| {
+                if btn.is_active() {
+                    eprintln!("Auto mode active");
+                    write_to_sysfs(&format!("{}/pwm1_enable", base), "0");
+                }
+            });
+        }
+        // Manual
+        {
+            let base = base.clone();
+            let ms = manual_speed.clone();
+            manual.connect_toggled(move |btn| {
+                if btn.is_active() {
+                    eprintln!("Manual mode active");
+                    write_to_sysfs(&format!("{}/pwm1_enable", base), "1");
+                    let pct = ms.value() / 100.0;
+                    let pwm = (pct * 255.0).round() as u8;
+                    write_to_sysfs(&format!("{}/pwm1", base), pwm.to_string());
+                }
+            });
+        }
+        {
+            let base = base.clone();
+            let manual_btn = manual.clone();
+            manual_speed.connect_value_changed(move |s| {
+                if !manual_btn.is_active() {
+                    return;
+                }
+                let pct = s.value();
+                let pwm = ((pct / 100.0) * 255.0).round() as u8;
+                eprintln!("Manual speed {}% -> {}", pct, pwm);
+                write_to_sysfs(&format!("{}/pwm1_enable", base), "1");
+                write_to_sysfs(&format!("{}/pwm1", base), pwm.to_string());
+            });
+        }
+    } else {
+        eprintln!("aynec hwmon device not found; disabling fan controls");
+        auto.set_sensitive(false);
+        manual.set_sensitive(false);
+        manual_speed.set_sensitive(false);
     }
     vbox.append(&manual_speed);
 
