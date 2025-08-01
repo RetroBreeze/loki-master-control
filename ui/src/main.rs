@@ -372,12 +372,9 @@ fn build_ui(app: &Application) {
 
     // Row 7: Fan profile radio‐style
     let row7 = gtk::Box::new(Orientation::Horizontal, 8);
-    let silent = gtk::CheckButton::with_label("Silent");
     let auto = gtk::CheckButton::with_label("Auto");
     let manual = gtk::CheckButton::with_label("Manual");
-    auto.set_group(Some(&silent));
-    manual.set_group(Some(&silent));
-    row7.append(&silent);
+    manual.set_group(Some(&auto));
     row7.append(&auto);
     row7.append(&manual);
     vbox.append(&row7);
@@ -393,17 +390,6 @@ fn build_ui(app: &Application) {
     let fan_base = pwm_base().map(|s| s.to_string());
     if let Some(base) = fan_base.clone() {
         eprintln!("Fan control base: {}", base);
-        // Silent
-        {
-            let base = base.clone();
-            silent.connect_toggled(move |btn| {
-                if btn.is_active() {
-                    eprintln!("Silent mode active");
-                    write_to_sysfs(&format!("{}/pwm1_enable", base), "0");
-                    write_to_sysfs(&format!("{}/pwm1", base), "0");
-                }
-            });
-        }
         // Auto
         {
             let base = base.clone();
@@ -444,7 +430,6 @@ fn build_ui(app: &Application) {
         }
     } else {
         eprintln!("aynec hwmon device not found; disabling fan controls");
-        silent.set_sensitive(false);
         auto.set_sensitive(false);
         manual.set_sensitive(false);
         manual_speed.set_sensitive(false);
