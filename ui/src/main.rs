@@ -101,26 +101,56 @@ fn rfkill_blocked(kind: &str) -> Option<bool> {
 }
 
 fn find_aynec_hwmon() -> Option<String> {
-    let dir_iter = fs::read_dir("/sys/class/hwmon").ok()?;
+    eprintln!("Scanning /sys/class/hwmon for aynec...");
+    let dir_iter = match fs::read_dir("/sys/class/hwmon") {
+        Ok(it) => it,
+        Err(e) => {
+            eprintln!("Failed to read /sys/class/hwmon: {}", e);
+            return None;
+        }
+    };
+
     for entry in dir_iter.flatten() {
         let base = entry.path();
-        let name = fs::read_to_string(base.join("name")).ok()?;
-        if name.trim() == "aynec" {
-            return Some(base.to_string_lossy().into_owned());
+        match fs::read_to_string(base.join("name")) {
+            Ok(name) => {
+                let trimmed = name.trim();
+                eprintln!(" - {} -> {}", base.display(), trimmed);
+                if trimmed == "aynec" {
+                    let path = base.to_string_lossy().into_owned();
+                    eprintln!("Found aynec hwmon at {}", path);
+                    return Some(path);
+                }
+            }
+            Err(e) => {
+                eprintln!("Failed to read {}/name: {}", base.display(), e);
+            }
         }
     }
+
+    eprintln!("aynec hwmon device not found");
     None
 }
 
 fn write_to_sysfs(path: &str, value: impl AsRef<str>) {
-    if let Err(e) = fs::write(path, value.as_ref()) {
-        eprintln!("Failed to write {}: {}", path, e);
+    let val = value.as_ref();
+    match fs::write(path, val) {
+        Ok(()) => {
+            eprintln!("wrote '{}' -> {}", val, path);
+        }
+        Err(e) => {
+            eprintln!("Failed to write '{}' to {}: {}", val, path, e);
+        }
     }
 }
 
 fn pwm_base() -> Option<&'static str> {
     PWM_BASE.get_or_init(find_aynec_hwmon);
-    PWM_BASE.get().and_then(|o| o.as_deref())
+    let base = PWM_BASE.get().and_then(|o| o.as_deref());
+    if let Some(b) = base {
+        eprintln!("Using hwmon base {}", b);
+    }
+    base
 }
 
 fn build_ui(app: &Application) {
@@ -354,11 +384,13 @@ fn build_ui(app: &Application) {
 
     let fan_base = pwm_base().map(|s| s.to_string());
     if let Some(base) = fan_base.clone() {
+        eprintln!("Fan control base: {}", base);
         // Silent
         {
             let base = base.clone();
             silent.connect_toggled(move |btn| {
                 if btn.is_active() {
+                    eprintln!("Silent mode active");
                     write_to_sysfs(&format!("{}/pwm1_enable", base), "0");
                     write_to_sysfs(&format!("{}/pwm1", base), "0");
                 }
@@ -369,6 +401,7 @@ fn build_ui(app: &Application) {
             let base = base.clone();
             auto.connect_toggled(move |btn| {
                 if btn.is_active() {
+                    eprintln!("Auto mode active");
                     write_to_sysfs(&format!("{}/pwm1_enable", base), "1");
                 }
             });
@@ -379,6 +412,7 @@ fn build_ui(app: &Application) {
             let ms = manual_speed.clone();
             manual.connect_toggled(move |btn| {
                 if btn.is_active() {
+                    eprintln!("Manual mode active");
                     write_to_sysfs(&format!("{}/pwm1_enable", base), "0");
                     let pct = ms.value() / 100.0;
                     let pwm = (pct * 255.0).round() as u8;
@@ -388,9 +422,14 @@ fn build_ui(app: &Application) {
         }
         {
             let base = base.clone();
+            let manual_btn = manual.clone();
             manual_speed.connect_value_changed(move |s| {
-                let pct = s.value() / 100.0;
-                let pwm = (pct * 255.0).round() as u8;
+                if !manual_btn.is_active() {
+                    return;
+                }
+                let pct = s.value();
+                let pwm = ((pct / 100.0) * 255.0).round() as u8;
+                eprintln!("Manual speed {}% -> {}", pct, pwm);
                 write_to_sysfs(&format!("{}/pwm1_enable", base), "0");
                 write_to_sysfs(&format!("{}/pwm1", base), pwm.to_string());
             });
