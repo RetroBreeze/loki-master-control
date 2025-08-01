@@ -137,6 +137,14 @@ fn write_to_sysfs(path: &str, value: impl AsRef<str>) {
     match fs::write(path, val) {
         Ok(()) => {
             eprintln!("wrote '{}' -> {}", val, path);
+            match fs::read_to_string(path) {
+                Ok(new_val) => {
+                    eprintln!("  read back: {}", new_val.trim());
+                }
+                Err(e) => {
+                    eprintln!("  failed to read back {}: {}", path, e);
+                }
+            }
         }
         Err(e) => {
             eprintln!("Failed to write '{}' to {}: {}", val, path, e);
