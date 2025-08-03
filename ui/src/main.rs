@@ -8,12 +8,64 @@ use libc;
 use std::fs;
 use std::process::Command;
 use std::rc::Rc;
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 
 static BRIGHTNESS_PATH: OnceLock<String> = OnceLock::new();
 static MAX_BRIGHTNESS: OnceLock<u32> = OnceLock::new();
 static DEFAULT_SINK: OnceLock<String> = OnceLock::new();
 static PWM_BASE: OnceLock<Option<String>> = OnceLock::new();
+
+#[derive(Clone, Copy)]
+struct FanPoint {
+    temp: f32,
+    percent: f32,
+}
+
+static QUIET_CURVE: [FanPoint; 5] = [
+    FanPoint {
+        temp: 40.0,
+        percent: 0.0,
+    },
+    FanPoint {
+        temp: 50.0,
+        percent: 20.0,
+    },
+    FanPoint {
+        temp: 60.0,
+        percent: 40.0,
+    },
+    FanPoint {
+        temp: 70.0,
+        percent: 70.0,
+    },
+    FanPoint {
+        temp: 80.0,
+        percent: 100.0,
+    },
+];
+
+static AGGRESSIVE_CURVE: [FanPoint; 5] = [
+    FanPoint {
+        temp: 30.0,
+        percent: 20.0,
+    },
+    FanPoint {
+        temp: 40.0,
+        percent: 40.0,
+    },
+    FanPoint {
+        temp: 50.0,
+        percent: 60.0,
+    },
+    FanPoint {
+        temp: 60.0,
+        percent: 80.0,
+    },
+    FanPoint {
+        temp: 70.0,
+        percent: 100.0,
+    },
+];
 
 fn init_backlight() {
     if MAX_BRIGHTNESS.get().is_some() && BRIGHTNESS_PATH.get().is_some() {
@@ -159,6 +211,33 @@ fn pwm_base() -> Option<&'static str> {
         eprintln!("Using hwmon base {}", b);
     }
     base
+}
+
+fn read_temp(base: &str) -> Option<f32> {
+    for idx in 1..=5 {
+        let path = format!("{}/temp{}_input", base, idx);
+        if let Ok(s) = fs::read_to_string(&path) {
+            if let Ok(v) = s.trim().parse::<f32>() {
+                return Some(v / 1000.0);
+            }
+        }
+    }
+    None
+}
+
+fn eval_curve(curve: &[FanPoint; 5], temp: f32) -> f32 {
+    if temp <= curve[0].temp {
+        return curve[0].percent;
+    }
+    for i in 0..curve.len() - 1 {
+        if temp <= curve[i + 1].temp {
+            let (t0, p0) = (curve[i].temp, curve[i].percent);
+            let (t1, p1) = (curve[i + 1].temp, curve[i + 1].percent);
+            let ratio = (temp - t0) / (t1 - t0);
+            return p0 + ratio * (p1 - p0);
+        }
+    }
+    curve[curve.len() - 1].percent
 }
 
 fn build_ui(app: &Application) {
@@ -373,9 +452,15 @@ fn build_ui(app: &Application) {
     // Row 7: Fan profile radio‐style
     let row7 = gtk::Box::new(Orientation::Horizontal, 8);
     let auto = gtk::CheckButton::with_label("Auto");
+    let quiet = gtk::CheckButton::with_label("Quiet");
+    quiet.set_group(Some(&auto));
+    let aggressive = gtk::CheckButton::with_label("Aggressive");
+    aggressive.set_group(Some(&auto));
     let manual = gtk::CheckButton::with_label("Manual");
     manual.set_group(Some(&auto));
     row7.append(&auto);
+    row7.append(&quiet);
+    row7.append(&aggressive);
     row7.append(&manual);
     vbox.append(&row7);
 
@@ -390,13 +475,56 @@ fn build_ui(app: &Application) {
     let fan_base = pwm_base().map(|s| s.to_string());
     if let Some(base) = fan_base.clone() {
         eprintln!("Fan control base: {}", base);
+        let profile_state: Arc<Mutex<Option<&'static [FanPoint; 5]>>> = Arc::new(Mutex::new(None));
+        {
+            let state = profile_state.clone();
+            let base = base.clone();
+            std::thread::spawn(move || loop {
+                let prof = { *state.lock().unwrap() };
+                if let Some(points) = prof {
+                    if let Some(temp) = read_temp(&base) {
+                        let pct = eval_curve(points, temp);
+                        let pwm = ((pct / 100.0) * 255.0).round() as u8;
+                        write_to_sysfs(&format!("{}/pwm1_enable", base), "1");
+                        write_to_sysfs(&format!("{}/pwm1", base), pwm.to_string());
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            });
+        }
         // Auto
         {
             let base = base.clone();
+            let state = profile_state.clone();
             auto.connect_toggled(move |btn| {
                 if btn.is_active() {
                     eprintln!("Auto mode active");
+                    *state.lock().unwrap() = None;
                     write_to_sysfs(&format!("{}/pwm1_enable", base), "0");
+                }
+            });
+        }
+        // Quiet
+        {
+            let state = profile_state.clone();
+            let base = base.clone();
+            quiet.connect_toggled(move |btn| {
+                if btn.is_active() {
+                    eprintln!("Quiet mode active");
+                    *state.lock().unwrap() = Some(&QUIET_CURVE);
+                    write_to_sysfs(&format!("{}/pwm1_enable", base), "1");
+                }
+            });
+        }
+        // Aggressive
+        {
+            let state = profile_state.clone();
+            let base = base.clone();
+            aggressive.connect_toggled(move |btn| {
+                if btn.is_active() {
+                    eprintln!("Aggressive mode active");
+                    *state.lock().unwrap() = Some(&AGGRESSIVE_CURVE);
+                    write_to_sysfs(&format!("{}/pwm1_enable", base), "1");
                 }
             });
         }
@@ -404,9 +532,11 @@ fn build_ui(app: &Application) {
         {
             let base = base.clone();
             let ms = manual_speed.clone();
+            let state = profile_state.clone();
             manual.connect_toggled(move |btn| {
                 if btn.is_active() {
                     eprintln!("Manual mode active");
+                    *state.lock().unwrap() = None;
                     write_to_sysfs(&format!("{}/pwm1_enable", base), "1");
                     let pct = ms.value() / 100.0;
                     let pwm = (pct * 255.0).round() as u8;
@@ -431,6 +561,8 @@ fn build_ui(app: &Application) {
     } else {
         eprintln!("aynec hwmon device not found; disabling fan controls");
         auto.set_sensitive(false);
+        quiet.set_sensitive(false);
+        aggressive.set_sensitive(false);
         manual.set_sensitive(false);
         manual_speed.set_sensitive(false);
     }
