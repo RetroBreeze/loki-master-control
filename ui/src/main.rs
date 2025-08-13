@@ -1,5 +1,4 @@
 use gtk::gdk;
-use gtk::glib;
 use gtk::prelude::*;
 use gtk::{Align, Application, ApplicationWindow, Orientation};
 use gtk4 as gtk;
@@ -204,10 +203,10 @@ fn write_to_sysfs(path: &str, value: impl AsRef<str>) {
     }
 }
 
-const RGB_BASE: &str = "/sys/class/leds/multicolor:chassis";
+const RGB_BASE: &str = "/sys/class/leds/ayn:rgb:joystick_rings";
 
 fn rgb_set_mode(mode: u8) {
-    write_to_sysfs(&format!("{}/device/led_mode", RGB_BASE), mode.to_string());
+    write_to_sysfs(&format!("{}/led_mode", RGB_BASE), mode.to_string());
 }
 
 fn rgb_set_brightness(val: u8) {
@@ -219,10 +218,6 @@ fn rgb_set_intensity(r: u8, g: u8, b: u8) {
         &format!("{}/multi_intensity", RGB_BASE),
         format!("{} {} {}", r, g, b),
     );
-}
-
-fn rgb_set_index() {
-    write_to_sysfs(&format!("{}/multi_index", RGB_BASE), "red green blue");
 }
 
 fn pwm_base() -> Option<&'static str> {
@@ -592,7 +587,6 @@ fn build_ui(app: &Application) {
     vbox.append(&gtk::Separator::new(Orientation::Horizontal));
 
     // RGB Lighting section
-    rgb_set_index();
     let rgb_section = gtk::Box::new(Orientation::Vertical, 8);
     let rgb_label = gtk::Label::new(Some("RGB Lighting"));
     rgb_label.add_css_class("heading");
