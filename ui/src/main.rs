@@ -617,8 +617,15 @@ fn build_ui(app: &Application) {
     // Mode selection
     let mode_row = gtk::Box::new(Orientation::Horizontal, 8);
     mode_row.append(&gtk::Label::new(Some("Mode:")));
-    let modes = gtk::DropDown::from_strings(&["Off", "Breathe", "Manual"]);
-    mode_row.append(&modes);
+    let off_btn = gtk::CheckButton::with_label("Off");
+    off_btn.set_active(true);
+    let breathe_btn = gtk::CheckButton::with_label("Breathe");
+    breathe_btn.set_group(Some(&off_btn));
+    let manual_btn = gtk::CheckButton::with_label("Manual");
+    manual_btn.set_group(Some(&off_btn));
+    mode_row.append(&off_btn);
+    mode_row.append(&breathe_btn);
+    mode_row.append(&manual_btn);
     rgb_section.append(&mode_row);
 
     // Manual controls
@@ -755,24 +762,33 @@ fn build_ui(app: &Application) {
     // Mode handler
     {
         let manual_box = manual_box.clone();
-        let apply = apply_settings.clone();
-        modes.connect_selected_notify(move |dd| match dd.selected() {
-            0 => {
+        off_btn.connect_toggled(move |btn| {
+            if btn.is_active() {
                 manual_box.set_visible(false);
                 rgb_set_mode(1);
                 rgb_set_brightness(0);
                 rgb_set_intensity(0, 0, 0);
             }
-            1 => {
+        });
+    }
+    {
+        let manual_box = manual_box.clone();
+        breathe_btn.connect_toggled(move |btn| {
+            if btn.is_active() {
                 manual_box.set_visible(false);
                 rgb_set_mode(0);
             }
-            2 => {
+        });
+    }
+    {
+        let manual_box = manual_box.clone();
+        let apply = apply_settings.clone();
+        manual_btn.connect_toggled(move |btn| {
+            if btn.is_active() {
                 manual_box.set_visible(true);
                 rgb_set_mode(1);
                 apply();
             }
-            _ => {}
         });
     }
 
