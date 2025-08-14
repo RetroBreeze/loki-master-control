@@ -7,13 +7,17 @@ use gtk4 as gtk;
 use gtk4_layer_shell::{self as layer_shell, LayerShell};
 use libc;
 use serde_json::json;
-use tokio::{io::{AsyncBufReadExt, AsyncWriteExt, BufReader}, net::UnixStream, runtime::Runtime};
 use std::cell::{Cell, RefCell};
 use std::fs;
 use std::process::Command;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    net::UnixStream,
+    runtime::Runtime,
+};
 
 static BRIGHTNESS_PATH: OnceLock<String> = OnceLock::new();
 static MAX_BRIGHTNESS: OnceLock<u32> = OnceLock::new();
@@ -71,6 +75,44 @@ static AGGRESSIVE_CURVE: [FanPoint; 5] = [
         percent: 100.0,
     },
 ];
+
+#[derive(Clone, Debug)]
+struct DisplayMode {
+    width: u32,
+    height: u32,
+    refresh: u32,
+}
+
+fn query_display_modes() -> Option<(String, Vec<DisplayMode>)> {
+    let output = Command::new("wlr-randr").arg("--json").output().ok()?;
+    let val: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    let connectors = val.get("connectors")?.as_array()?;
+    let conn = connectors.iter().find(|c| c.get("modes").is_some())?;
+    let name = conn.get("name")?.as_str()?.to_string();
+    let modes_arr = conn.get("modes")?.as_array()?;
+    let mut modes = Vec::new();
+    for m in modes_arr {
+        let w = m.get("width").and_then(|v| v.as_u64())? as u32;
+        let h = m.get("height").and_then(|v| v.as_u64())? as u32;
+        let r = m.get("refresh").and_then(|v| v.as_u64())? as u32;
+        modes.push(DisplayMode {
+            width: w,
+            height: h,
+            refresh: r,
+        });
+    }
+    Some((name, modes))
+}
+
+fn apply_display_mode(output: &str, width: u32, height: u32, refresh: u32) {
+    let hz = refresh as f64 / 1000.0;
+    let mode = format!("{}x{}@{}Hz", width, height, hz);
+    daemon_send(json!({
+        "cmd": "run",
+        "program": "wlr-randr",
+        "args": ["--output", output, "--mode", mode]
+    }));
+}
 
 fn init_backlight() {
     if MAX_BRIGHTNESS.get().is_some() && BRIGHTNESS_PATH.get().is_some() {
@@ -413,19 +455,114 @@ fn build_ui(app: &Application) {
 
     vbox.append(&gtk::Separator::new(Orientation::Horizontal));
 
-    // Row 4: Resolution dropdown
-    let row4 = gtk::Box::new(Orientation::Horizontal, 8);
-    let res_combo = gtk::DropDown::from_strings(&["1080p", "720p"]);
-    row4.append(&gtk::Label::new(Some("Resolution:")));
-    row4.append(&res_combo);
-    vbox.append(&row4);
+    // Row 4 & 5: Resolution and refresh rate
+    if let Some((output_name, modes)) = query_display_modes() {
+        use std::collections::BTreeSet;
+        let output_name = Rc::new(output_name);
+        let modes = Rc::new(modes);
+        let mut set = BTreeSet::new();
+        for m in modes.iter() {
+            set.insert((m.width, m.height));
+        }
+        let resolutions: Vec<(u32, u32)> = set.into_iter().collect();
+        let res_strings: Vec<String> = resolutions
+            .iter()
+            .map(|(w, h)| format!("{}x{}", w, h))
+            .collect();
+        let res_combo = gtk::DropDown::from_strings(&res_strings);
 
-    // Row 5: Refresh rate buttons
-    let row5 = gtk::Box::new(Orientation::Horizontal, 8);
-    for hz in ["40Hz", "50Hz", "60Hz"] {
-        row5.append(&gtk::Button::with_label(hz));
+        let refresh_model = gtk::StringList::new(&[]);
+        let refresh_combo = gtk::DropDown::new(Some(&refresh_model));
+        let refresh_model = Rc::new(refresh_model);
+        let resolutions = Rc::new(resolutions);
+
+        let update_refresh: Rc<dyn Fn(u32)> = {
+            let modes = modes.clone();
+            let resolutions = resolutions.clone();
+            let refresh_model = refresh_model.clone();
+            let refresh_combo = refresh_combo.clone();
+            let output_name = output_name.clone();
+            Rc::new(move |idx: u32| {
+                if let Some((w, h)) = resolutions.get(idx as usize) {
+                    let mut rates: Vec<u32> = modes
+                        .iter()
+                        .filter(|m| m.width == *w && m.height == *h)
+                        .map(|m| m.refresh)
+                        .collect();
+                    rates.sort();
+                    rates.dedup();
+                    while refresh_model.n_items() > 0 {
+                        refresh_model.remove(refresh_model.n_items() - 1);
+                    }
+                    for r in &rates {
+                        let disp = if r % 1000 == 0 {
+                            format!("{} Hz", r / 1000)
+                        } else {
+                            format!("{:.1} Hz", *r as f64 / 1000.0)
+                        };
+                        refresh_model.append(&disp);
+                    }
+                    refresh_combo.set_selected(0);
+                    if let Some(first) = rates.first() {
+                        apply_display_mode(&output_name, *w, *h, *first);
+                    }
+                }
+            })
+        };
+
+        update_refresh(0);
+
+        res_combo.connect_selected_notify({
+            let update_refresh = update_refresh.clone();
+            move |combo| {
+                update_refresh(combo.selected());
+            }
+        });
+
+        refresh_combo.connect_selected_notify({
+            let modes = modes.clone();
+            let resolutions = resolutions.clone();
+            let output_name = output_name.clone();
+            let res_combo = res_combo.clone();
+            move |combo| {
+                let res_idx = res_combo.selected();
+                if let Some((w, h)) = resolutions.get(res_idx as usize) {
+                    let mut rates: Vec<u32> = modes
+                        .iter()
+                        .filter(|m| m.width == *w && m.height == *h)
+                        .map(|m| m.refresh)
+                        .collect();
+                    rates.sort();
+                    rates.dedup();
+                    if let Some(r) = rates.get(combo.selected() as usize) {
+                        apply_display_mode(&output_name, *w, *h, *r);
+                    }
+                }
+            }
+        });
+
+        let row4 = gtk::Box::new(Orientation::Horizontal, 8);
+        row4.append(&gtk::Label::new(Some("Resolution:")));
+        row4.append(&res_combo);
+        vbox.append(&row4);
+
+        let row5 = gtk::Box::new(Orientation::Horizontal, 8);
+        row5.append(&gtk::Label::new(Some("Refresh:")));
+        row5.append(&refresh_combo);
+        vbox.append(&row5);
+    } else {
+        let row4 = gtk::Box::new(Orientation::Horizontal, 8);
+        let res_combo = gtk::DropDown::from_strings(&["1080p", "720p"]);
+        row4.append(&gtk::Label::new(Some("Resolution:")));
+        row4.append(&res_combo);
+        vbox.append(&row4);
+
+        let row5 = gtk::Box::new(Orientation::Horizontal, 8);
+        for hz in ["40Hz", "50Hz", "60Hz"] {
+            row5.append(&gtk::Button::with_label(hz));
+        }
+        vbox.append(&row5);
     }
-    vbox.append(&row5);
 
     vbox.append(&gtk::Separator::new(Orientation::Horizontal));
 
@@ -822,4 +959,3 @@ fn daemon_send(val: serde_json::Value) {
         }
     });
 }
-
