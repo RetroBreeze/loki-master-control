@@ -681,6 +681,7 @@ fn build_ui(app: &Application) {
         let hue = hue.clone();
         let apply = apply_settings.clone();
         let hue_area = hue_area.clone();
+        let draw_hue = hue.clone();
         hue_area.set_draw_func(move |_w, cr, width, height| {
             let grad = cairo::LinearGradient::new(0.0, 0.0, width as f64, 0.0);
             let stops = [
@@ -699,7 +700,7 @@ fn build_ui(app: &Application) {
             cr.rectangle(0.0, 0.0, width as f64, height as f64);
             let _ = cr.fill();
 
-            let x = hue.get() / 360.0 * width as f64;
+            let x = draw_hue.get() / 360.0 * width as f64;
             cr.set_source_rgb(1.0, 1.0, 1.0);
             cr.rectangle(x - 2.0, 0.0, 4.0, height as f64);
             let _ = cr.fill();
