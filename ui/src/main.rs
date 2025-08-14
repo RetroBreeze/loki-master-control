@@ -6,6 +6,8 @@ use gtk::{Align, Application, ApplicationWindow, Orientation};
 use gtk4 as gtk;
 use gtk4_layer_shell::{self as layer_shell, LayerShell};
 use libc;
+use serde_json::json;
+use tokio::{io::{AsyncBufReadExt, AsyncWriteExt, BufReader}, net::UnixStream, runtime::Runtime};
 use std::cell::{Cell, RefCell};
 use std::fs;
 use std::process::Command;
@@ -115,9 +117,7 @@ fn read_max_brightness() -> u32 {
 fn write_brightness(value: u32) {
     init_backlight();
     if let Some(path) = BRIGHTNESS_PATH.get() {
-        if let Err(e) = fs::write(path, value.to_string()) {
-            eprintln!("Failed to write {}: {}", path, e);
-        }
+        daemon_send(json!({"cmd":"write","path":path,"value":value.to_string()}));
     } else {
         eprintln!("Backlight brightness path unavailable");
     }
@@ -188,9 +188,7 @@ fn find_aynec_hwmon() -> Option<String> {
 }
 
 fn write_to_sysfs(path: &str, value: impl AsRef<str>) {
-    if let Err(e) = fs::write(path, value.as_ref()) {
-        eprintln!("Failed to write '{}' to {}: {}", value.as_ref(), path, e);
-    }
+    daemon_send(json!({"cmd":"write","path":path,"value":value.as_ref()}));
 }
 
 const RGB_BASE: &str = "/sys/class/leds/ayn:rgb:joystick_rings";
@@ -319,9 +317,7 @@ fn build_ui(app: &Application) {
     }
     {
         wifi_btn.connect_toggled(|_| {
-            if let Err(e) = Command::new("rfkill").args(&["toggle", "wifi"]).spawn() {
-                eprintln!("Failed to toggle Wi-Fi: {}", e);
-            }
+            daemon_send(json!({"cmd":"run","program":"rfkill","args":["toggle","wifi"]}));
         });
     }
     row1.append(&wifi_btn);
@@ -334,12 +330,7 @@ fn build_ui(app: &Application) {
     }
     {
         bt_btn.connect_toggled(|_| {
-            if let Err(e) = Command::new("rfkill")
-                .args(&["toggle", "bluetooth"])
-                .spawn()
-            {
-                eprintln!("Failed to toggle Bluetooth: {}", e);
-            }
+            daemon_send(json!({"cmd":"run","program":"rfkill","args":["toggle","bluetooth"]}));
         });
     }
     row1.append(&bt_btn);
@@ -352,14 +343,12 @@ fn build_ui(app: &Application) {
     }
     {
         airplane_btn.connect_toggled(|btn| {
-            let args = if btn.is_active() {
-                vec!["block", "all"]
+            let args: Vec<String> = if btn.is_active() {
+                vec!["block".into(), "all".into()]
             } else {
-                vec!["unblock", "all"]
+                vec!["unblock".into(), "all".into()]
             };
-            if let Err(e) = Command::new("rfkill").args(&args).spawn() {
-                eprintln!("Failed to toggle airplane mode: {}", e);
-            }
+            daemon_send(json!({"cmd":"run","program":"rfkill","args":args}));
         });
     }
     row1.append(&airplane_btn);
@@ -456,17 +445,7 @@ fn build_ui(app: &Application) {
             tdp_value_cl.set_text(&format!("{} W", w));
 
             let stapm = format!("{}000", w);
-            let mut cmd = if unsafe { libc::geteuid() } == 0 {
-                Command::new("ryzenadj")
-            } else {
-                let mut c = Command::new("sudo");
-                c.arg("ryzenadj");
-                c
-            };
-            cmd.args(&["--stapm-limit", &stapm]);
-            if let Err(e) = cmd.spawn() {
-                eprintln!("Failed to run ryzenadj: {}", e);
-            }
+            daemon_send(json!({"cmd":"run","program":"ryzenadj","args":["--stapm-limit", stapm]}));
         });
     }
     row6.append(&tdp_label);
@@ -814,3 +793,33 @@ fn main() {
     app.connect_activate(build_ui);
     app.run();
 }
+
+fn tokio_rt() -> &'static Runtime {
+    static RT: OnceLock<Runtime> = OnceLock::new();
+    RT.get_or_init(|| Runtime::new().expect("tokio runtime"))
+}
+
+fn daemon_send(val: serde_json::Value) {
+    let rt = tokio_rt();
+    rt.spawn(async move {
+        let msg = val.to_string() + "\n";
+        for _ in 0..3 {
+            match UnixStream::connect("/run/loki-master.sock").await {
+                Ok(stream) => {
+                    let mut stream = stream;
+                    if stream.write_all(msg.as_bytes()).await.is_ok() {
+                        let mut reader = BufReader::new(stream);
+                        let mut resp = String::new();
+                        let _ = reader.read_line(&mut resp).await;
+                    }
+                    return;
+                }
+                Err(e) => {
+                    eprintln!("connect failed: {e}");
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
+            }
+        }
+    });
+}
+
