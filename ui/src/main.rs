@@ -732,7 +732,7 @@ fn build_ui(app: &Application) {
                 }
             });
         }
-        hue_area.add_controller(&drag);
+        hue_area.add_controller(drag);
     }
 
     // Draw preview circle
