@@ -662,17 +662,17 @@ fn build_ui(app: &Application) {
     let pending = Rc::new(RefCell::new(None::<SourceId>));
     let schedule_apply = Rc::new({
         let apply_settings = apply_settings.clone();
-        let pending = pending.clone();
+        let pending_ref = pending.clone();
         move || {
-            if pending.borrow().is_none() {
+            if pending_ref.borrow().is_none() {
                 let apply = apply_settings.clone();
-                let pending = pending.clone();
+                let pending_clone = pending_ref.clone();
                 let id = glib::timeout_add_local(Duration::from_millis(16), move || {
                     apply();
-                    pending.borrow_mut().take();
+                    pending_clone.borrow_mut().take();
                     glib::ControlFlow::Break
                 });
-                *pending.borrow_mut() = Some(id);
+                *pending_ref.borrow_mut() = Some(id);
             }
         }
     });
