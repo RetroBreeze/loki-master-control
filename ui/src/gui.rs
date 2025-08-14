@@ -472,7 +472,7 @@ fn build_ui(app: &Application) {
         let res_combo = gtk::DropDown::from_strings(&res_refs);
 
         let refresh_model = gtk::StringList::new(&[]);
-        let refresh_combo = gtk::DropDown::new(Some(&refresh_model), None::<gtk::Expression>);
+        let refresh_combo = gtk::DropDown::new(Some(refresh_model.clone()), None::<gtk::Expression>);
         let refresh_model = Rc::new(refresh_model);
         let resolutions = Rc::new(resolutions);
 
