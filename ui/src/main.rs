@@ -1,15 +1,17 @@
+use gtk::cairo;
 use gtk::gdk;
+use gtk::glib::{self, SourceId};
 use gtk::prelude::*;
 use gtk::{Align, Application, ApplicationWindow, Orientation};
 use gtk4 as gtk;
-use gtk::cairo;
-use std::cell::Cell;
 use gtk4_layer_shell::{self as layer_shell, LayerShell};
 use libc;
+use std::cell::Cell;
 use std::fs;
 use std::process::Command;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 static BRIGHTNESS_PATH: OnceLock<String> = OnceLock::new();
 static MAX_BRIGHTNESS: OnceLock<u32> = OnceLock::new();
@@ -186,22 +188,8 @@ fn find_aynec_hwmon() -> Option<String> {
 }
 
 fn write_to_sysfs(path: &str, value: impl AsRef<str>) {
-    let val = value.as_ref();
-    match fs::write(path, val) {
-        Ok(()) => {
-            eprintln!("wrote '{}' -> {}", val, path);
-            match fs::read_to_string(path) {
-                Ok(new_val) => {
-                    eprintln!("  read back: {}", new_val.trim());
-                }
-                Err(e) => {
-                    eprintln!("  failed to read back {}: {}", path, e);
-                }
-            }
-        }
-        Err(e) => {
-            eprintln!("Failed to write '{}' to {}: {}", val, path, e);
-        }
+    if let Err(e) = fs::write(path, value.as_ref()) {
+        eprintln!("Failed to write '{}' to {}: {}", value.as_ref(), path, e);
     }
 }
 
@@ -671,15 +659,33 @@ fn build_ui(app: &Application) {
         }
     });
 
+    let pending = Rc::new(Cell::new(None::<SourceId>));
+    let schedule_apply = Rc::new({
+        let apply_settings = apply_settings.clone();
+        let pending = pending.clone();
+        move || {
+            if pending.get().is_none() {
+                let apply = apply_settings.clone();
+                let pending = pending.clone();
+                let id = glib::timeout_add_local(Duration::from_millis(16), move || {
+                    apply();
+                    pending.set(None);
+                    glib::Continue(false)
+                });
+                pending.set(Some(id));
+            }
+        }
+    });
+
     brightness.connect_value_changed({
-        let apply = apply_settings.clone();
-        move |_| apply()
+        let schedule = schedule_apply.clone();
+        move |_| schedule()
     });
 
     // Draw hue gradient and handle interaction
     {
         let hue = hue.clone();
-        let apply = apply_settings.clone();
+        let schedule = schedule_apply.clone();
         let hue_area = hue_area.clone();
         let draw_hue = hue.clone();
         hue_area.set_draw_func(move |_w, cr, width, height| {
@@ -709,13 +715,13 @@ fn build_ui(app: &Application) {
         let update_hue = {
             let hue_area = hue_area.clone();
             let hue = hue.clone();
-            let apply = apply.clone();
+            let schedule = schedule.clone();
             move |x: f64| {
                 let width = hue_area.allocated_width() as f64;
                 let clamped = x.clamp(0.0, width);
                 hue.set(clamped / width * 360.0);
                 hue_area.queue_draw();
-                apply();
+                schedule();
             }
         };
 
