@@ -2,6 +2,8 @@ use gtk::gdk;
 use gtk::prelude::*;
 use gtk::{Align, Application, ApplicationWindow, Orientation};
 use gtk4 as gtk;
+use gtk::cairo;
+use std::cell::Cell;
 use gtk4_layer_shell::{self as layer_shell, LayerShell};
 use libc;
 use std::fs;
@@ -218,6 +220,25 @@ fn rgb_set_intensity(r: u8, g: u8, b: u8) {
         &format!("{}/multi_intensity", RGB_BASE),
         format!("{} {} {}", r, g, b),
     );
+}
+
+fn hsv_to_rgb(h: f64, s: f64, v: f64) -> (u8, u8, u8) {
+    let c = v * s;
+    let hh = (h / 60.0) % 6.0;
+    let x = c * (1.0 - ((hh % 2.0) - 1.0).abs());
+    let (r1, g1, b1) = match hh as i32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = v - c;
+    let r = ((r1 + m) * 255.0).round() as u8;
+    let g = ((g1 + m) * 255.0).round() as u8;
+    let b = ((b1 + m) * 255.0).round() as u8;
+    (r, g, b)
 }
 
 fn pwm_base() -> Option<&'static str> {
@@ -600,67 +621,154 @@ fn build_ui(app: &Application) {
     mode_row.append(&modes);
     rgb_section.append(&mode_row);
 
-    // Sliders for manual mode
-    let sliders = gtk::Box::new(Orientation::Vertical, 4);
+    // Manual controls
+    let manual_box = gtk::Box::new(Orientation::Vertical, 8);
+    let hue = Rc::new(Cell::new(0.0f64));
+
+    // Hue slider
+    let hue_area = gtk::DrawingArea::new();
+    hue_area.set_content_height(20);
+    hue_area.set_hexpand(true);
+    manual_box.append(&hue_area);
+
+    // Brightness slider
+    let bright_row = gtk::Box::new(Orientation::Horizontal, 4);
+    bright_row.append(&gtk::Label::new(Some("Brightness:")));
     let brightness = gtk::Scale::with_range(Orientation::Horizontal, 0.0, 255.0, 1.0);
-    let red = gtk::Scale::with_range(Orientation::Horizontal, 0.0, 255.0, 1.0);
-    let green = gtk::Scale::with_range(Orientation::Horizontal, 0.0, 255.0, 1.0);
-    let blue = gtk::Scale::with_range(Orientation::Horizontal, 0.0, 255.0, 1.0);
-    for (lbl, scale) in [
-        ("Brightness:", &brightness),
-        ("Red:", &red),
-        ("Green:", &green),
-        ("Blue:", &blue),
-    ] {
-        let row = gtk::Box::new(Orientation::Horizontal, 4);
-        row.append(&gtk::Label::new(Some(lbl)));
-        scale.set_hexpand(true);
-        row.append(scale);
-        sliders.append(&row);
-    }
-    sliders.set_visible(false);
-    rgb_section.append(&sliders);
+    brightness.set_hexpand(true);
+    brightness.set_value(255.0);
+    bright_row.append(&brightness);
+    manual_box.append(&bright_row);
+
+    // Preview circle
+    let preview = gtk::DrawingArea::new();
+    preview.set_content_width(40);
+    preview.set_content_height(40);
+    manual_box.append(&preview);
+
+    manual_box.set_visible(false);
+    rgb_section.append(&manual_box);
 
     // Apply RGB changes
     let apply_settings = Rc::new({
+        let hue = hue.clone();
         let brightness = brightness.clone();
-        let red = red.clone();
-        let green = green.clone();
-        let blue = blue.clone();
+        let preview = preview.clone();
         move || {
+            let h = hue.get();
             let b = brightness.value() as u8;
-            let r = red.value() as u8;
-            let g = green.value() as u8;
-            let bl = blue.value() as u8;
+            let (r, g, bl) = hsv_to_rgb(h, 1.0, 1.0);
             rgb_set_brightness(b);
             rgb_set_intensity(r, g, bl);
+            preview.queue_draw();
         }
     });
 
-    for scale in [&brightness, &red, &green, &blue] {
+    brightness.connect_value_changed({
         let apply = apply_settings.clone();
-        scale.connect_value_changed(move |_| {
-            apply();
+        move |_| apply()
+    });
+
+    // Draw hue gradient and handle interaction
+    {
+        let hue = hue.clone();
+        let apply = apply_settings.clone();
+        let hue_area = hue_area.clone();
+        hue_area.set_draw_func(move |_w, cr, width, height| {
+            let grad = cairo::LinearGradient::new(0.0, 0.0, width as f64, 0.0);
+            let stops = [
+                (0.0, 1.0, 0.0, 0.0),
+                (1.0 / 6.0, 1.0, 1.0, 0.0),
+                (2.0 / 6.0, 0.0, 1.0, 0.0),
+                (3.0 / 6.0, 0.0, 1.0, 1.0),
+                (4.0 / 6.0, 0.0, 0.0, 1.0),
+                (5.0 / 6.0, 1.0, 0.0, 1.0),
+                (1.0, 1.0, 0.0, 0.0),
+            ];
+            for (pos, r, g, b) in stops {
+                grad.add_color_stop_rgb(pos, r, g, b);
+            }
+            let _ = cr.set_source(&grad);
+            cr.rectangle(0.0, 0.0, width as f64, height as f64);
+            let _ = cr.fill();
+
+            let x = hue.get() / 360.0 * width as f64;
+            cr.set_source_rgb(1.0, 1.0, 1.0);
+            cr.rectangle(x - 2.0, 0.0, 4.0, height as f64);
+            let _ = cr.fill();
+        });
+
+        let update_hue = {
+            let hue_area = hue_area.clone();
+            let hue = hue.clone();
+            let apply = apply.clone();
+            move |x: f64| {
+                let width = hue_area.allocated_width() as f64;
+                let clamped = x.clamp(0.0, width);
+                hue.set(clamped / width * 360.0);
+                hue_area.queue_draw();
+                apply();
+            }
+        };
+
+        let drag = gtk::GestureDrag::new();
+        drag.set_button(0);
+        {
+            let update = update_hue.clone();
+            drag.connect_drag_begin(move |_g, x, _y| update(x));
+        }
+        {
+            let update = update_hue.clone();
+            drag.connect_drag_update(move |g, dx, _dy| {
+                if let Some((start_x, _)) = g.start_point() {
+                    update(start_x + dx);
+                }
+            });
+        }
+        hue_area.add_controller(&drag);
+    }
+
+    // Draw preview circle
+    {
+        let hue = hue.clone();
+        let brightness = brightness.clone();
+        preview.set_draw_func(move |_w, cr, width, height| {
+            let (r, g, b) = hsv_to_rgb(hue.get(), 1.0, 1.0);
+            let scale = brightness.value() / 255.0;
+            cr.set_source_rgb(
+                (r as f64 / 255.0) * scale,
+                (g as f64 / 255.0) * scale,
+                (b as f64 / 255.0) * scale,
+            );
+            let radius = (width.min(height) as f64) / 2.0;
+            cr.arc(
+                width as f64 / 2.0,
+                height as f64 / 2.0,
+                radius,
+                0.0,
+                std::f64::consts::PI * 2.0,
+            );
+            let _ = cr.fill();
         });
     }
 
     // Mode handler
     {
-        let sliders = sliders.clone();
+        let manual_box = manual_box.clone();
         let apply = apply_settings.clone();
         modes.connect_selected_notify(move |dd| match dd.selected() {
             0 => {
-                sliders.set_visible(false);
+                manual_box.set_visible(false);
                 rgb_set_mode(1);
                 rgb_set_brightness(0);
                 rgb_set_intensity(0, 0, 0);
             }
             1 => {
-                sliders.set_visible(false);
+                manual_box.set_visible(false);
                 rgb_set_mode(0);
             }
             2 => {
-                sliders.set_visible(true);
+                manual_box.set_visible(true);
                 rgb_set_mode(1);
                 apply();
             }
