@@ -802,13 +802,6 @@ fn build_ui(app: &Application) {
     vbox.append(&rgb_section);
     vbox.append(&gtk::Separator::new(Orientation::Horizontal));
 
-    // Row 10: Vibration toggle
-    let row10 = gtk::Box::new(Orientation::Horizontal, 8);
-    let vibration = gtk::CheckButton::with_label("Vibration");
-    row10.append(&vibration);
-    row10.append(&gtk::Label::new(Some("Stick calibration coming soon")));
-    vbox.append(&row10);
-
     scrolled.set_child(Some(&vbox));
     window.set_child(Some(&scrolled));
     window.present();
