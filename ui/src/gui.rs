@@ -5,7 +5,6 @@ use gtk::prelude::*;
 use gtk::{Align, Application, ApplicationWindow, Orientation};
 use gtk4 as gtk;
 use gtk4_layer_shell::{self as layer_shell, LayerShell};
-use libc;
 use serde_json::json;
 use std::cell::{Cell, RefCell};
 use std::fs;
@@ -469,10 +468,11 @@ fn build_ui(app: &Application) {
             .iter()
             .map(|(w, h)| format!("{}x{}", w, h))
             .collect();
-        let res_combo = gtk::DropDown::from_strings(&res_strings);
+        let res_refs: Vec<&str> = res_strings.iter().map(|s| s.as_str()).collect();
+        let res_combo = gtk::DropDown::from_strings(&res_refs);
 
         let refresh_model = gtk::StringList::new(&[]);
-        let refresh_combo = gtk::DropDown::new(Some(&refresh_model));
+        let refresh_combo = gtk::DropDown::new(Some(&refresh_model), None::<gtk::Expression>);
         let refresh_model = Rc::new(refresh_model);
         let resolutions = Rc::new(resolutions);
 
