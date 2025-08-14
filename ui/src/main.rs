@@ -6,7 +6,7 @@ use gtk::{Align, Application, ApplicationWindow, Orientation};
 use gtk4 as gtk;
 use gtk4_layer_shell::{self as layer_shell, LayerShell};
 use libc;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::fs;
 use std::process::Command;
 use std::rc::Rc;
@@ -659,20 +659,20 @@ fn build_ui(app: &Application) {
         }
     });
 
-    let pending = Rc::new(Cell::new(None::<SourceId>));
+    let pending = Rc::new(RefCell::new(None::<SourceId>));
     let schedule_apply = Rc::new({
         let apply_settings = apply_settings.clone();
         let pending = pending.clone();
         move || {
-            if pending.get().is_none() {
+            if pending.borrow().is_none() {
                 let apply = apply_settings.clone();
                 let pending = pending.clone();
                 let id = glib::timeout_add_local(Duration::from_millis(16), move || {
                     apply();
-                    pending.set(None);
-                    glib::Continue(false)
+                    pending.borrow_mut().take();
+                    glib::ControlFlow::Break
                 });
-                pending.set(Some(id));
+                *pending.borrow_mut() = Some(id);
             }
         }
     });
